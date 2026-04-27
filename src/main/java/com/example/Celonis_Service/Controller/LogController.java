@@ -18,7 +18,7 @@ public class LogController {
         this.repo = repo;
     }
 
-    // 🔥 ENDPOINT UTILISÉ PAR LE WORKER
+    //  ENDPOINT UTILISÉ PAR LE WORKER
     @PostMapping
     public ProcessLog create(@RequestBody ProcessLogDTO dto) {
 
@@ -35,7 +35,7 @@ public class LogController {
         return repo.save(log);
     }
 
-    // 🔥 TEST MANUEL
+    //  TEST MANUEL
     @PostMapping("/test")
     public ProcessLog createTest() {
 
@@ -47,7 +47,7 @@ public class LogController {
         return repo.save(log);
     }
 
-    // 🔥 LIST ALL LOGS
+    //  LIST ALL LOGS
     @GetMapping
     public List<ProcessLog> getLogs() {
         return repo.findAll();

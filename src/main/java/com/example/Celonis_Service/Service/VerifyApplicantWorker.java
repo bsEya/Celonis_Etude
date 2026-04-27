@@ -4,16 +4,19 @@ import com.example.Celonis_Service.Model.ProcessLog;
 import com.example.Celonis_Service.Repo.ProcessLogRepository;
 import io.camunda.zeebe.client.api.response.ActivatedJob;
 import io.camunda.zeebe.client.api.worker.JobClient;
-import lombok.Value;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
-import java.util.Collections;
-import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
+
 import io.camunda.zeebe.client.ZeebeClient;
 import jakarta.annotation.PostConstruct;
 import org.springframework.web.client.RestTemplate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 
 @Component
 public class VerifyApplicantWorker {
@@ -21,9 +24,11 @@ public class VerifyApplicantWorker {
     private final ZeebeClient zeebeClient;
     private final ProcessLogRepository logRepo;
     private final RestTemplate restTemplate;
+    private static final Logger logger = LoggerFactory.getLogger(VerifyApplicantWorker.class);
 
-    private static final String PRODUCT_URL =
-            "https://dummyjson.com/products/99999999999999";
+
+    @Value("${product.url}")
+    private String productUrl;
 
     public VerifyApplicantWorker(ZeebeClient zeebeClient,
                                  ProcessLogRepository logRepo) {
@@ -77,14 +82,14 @@ public class VerifyApplicantWorker {
             double rating = getDouble(product, "rating");
             int stock = getInt(product, "stock");
 
-            // RULES
+            // décision  dossier est approuvé si:
             boolean approved =
                     salary > 1200 &&
                             amount < 20000 &&
                             rating >= 2.0 &&
                             stock > 0;
 
-            // CAMUNDA TERMINEE
+            // Indique à Camunda que la tâche est terminée & Renvoie des variables au process
             completeJob(jobClient, job, approved);
 
             log.setStatus(approved ? "APPROVED" : "REJECTED");
@@ -92,13 +97,54 @@ public class VerifyApplicantWorker {
                     ? "Approved by business rules"
                     : "Rejected by rules");
 
-        } catch (Exception e) {
+//        } catch (Exception e) {
+//
+//            //  INCIDENT TECHNIQUE
+//            failJob(jobClient, job, e);
+//
+//            log.setStatus("INCIDENT");
+//            log.setMessage(e.getMessage());
+//
+        } catch (NumberFormatException e) {
 
-            // 🔴 INCIDENT TECHNIQUE
+            log.setStatus("PARSING_ERROR");
+            log.setMessage("Invalid number format: " + e.getMessage());
+
+            logger.error("PARSING ERROR | process={} | {}",
+                    job.getProcessInstanceKey(), e.getMessage());
+
             failJob(jobClient, job, e);
 
-            log.setStatus("INCIDENT");
+        } catch (RuntimeException e) {
+
+            if (e.getMessage() != null && e.getMessage().contains("API_ERROR")) {
+
+                log.setStatus("API_ERROR");
+                log.setMessage(e.getMessage());
+
+                logger.error("API ERROR | process={} | {}",
+                        job.getProcessInstanceKey(), e.getMessage());
+
+            } else {
+
+                log.setStatus("TECHNICAL_ERROR");
+                log.setMessage(e.getMessage());
+
+                logger.error("TECHNICAL ERROR | process={} | {}",
+                        job.getProcessInstanceKey(), e.getMessage());
+            }
+
+            failJob(jobClient, job, e);
+
+        } catch (Exception e) {
+
+            log.setStatus("UNKNOWN_ERROR");
             log.setMessage(e.getMessage());
+
+            logger.error("UNKNOWN ERROR | process={} | {}",
+                    job.getProcessInstanceKey(), e.getMessage(), e);
+
+            failJob(jobClient, job, e);
 
         } finally {
 
@@ -110,10 +156,13 @@ public class VerifyApplicantWorker {
     // API SAFE CALL
     private Map<String, Object> fetchProduct() {
         try {
-            return restTemplate.getForObject(PRODUCT_URL, Map.class);
+            logger.info("Calling product API: {}", productUrl);
+            return restTemplate.getForObject(productUrl, Map.class);
+
         } catch (Exception e) {
-            System.out.println("⚠️ API FAILED: " + e.getMessage());
-            return Map.of("message", "API_ERROR");
+            logger.warn("API CALL FAILED: {}", e.getMessage());
+
+            throw new RuntimeException("API_ERROR: " + e.getMessage());
         }
     }
 
@@ -151,14 +200,36 @@ public class VerifyApplicantWorker {
     }
 
     //  SAVE LOG SAFE
-    private void saveLog(ProcessLog log) {
-        try {
-            logRepo.save(log);
-            System.out.println("🧾 LOG SAVED: " + log.getStatus());
-        } catch (Exception e) {
-            System.out.println("❌ LOG SAVE FAILED: " + e.getMessage());
-        }
+//    private void saveLog(ProcessLog log) {
+//        try {
+//            logRepo.save(log);
+////            System.out.println("LOG SAVED: " + log.getStatus());// le27/04
+//            logger.info("LOG SAVED: {}", log.getStatus());
+//        } catch (Exception e) {
+//            System.out.println(" LOG SAVE FAILED: " + e.getMessage());
+//        }
+//    }
+private void saveLog(ProcessLog log) {
+    try {
+        // 1. Sauvegarde en base
+        logRepo.save(log);
+
+        // 2. Générer ID unique
+        String logId = UUID.randomUUID().toString();
+
+        // 3. Sauvegarde fichier
+        logger.info("LOG_ID={} | STATUS={} | ACTIVITY={} | MESSAGE={} | DURATION={}ms",
+                logId,
+                log.getStatus(),
+                log.getActivity(),
+                log.getMessage(),
+                log.getDurationMs());
+
+
+    } catch (Exception e) {
+        logger.error("LOG SAVE FAILED", e);
     }
+}
 
     //  SAFE PARSERS
     private int getInt(Map<String, Object> map, String key) {
@@ -177,113 +248,3 @@ public class VerifyApplicantWorker {
     }
 }
 
-//                                "https://dummyjson.com/product/10000000000",
-//                                Map.class
-//                        );
-//
-//                        double price = Double.parseDouble(product.get("price").toString());
-//                        double rating = Double.parseDouble(product.get("rating").toString());
-//                        int stock = Integer.parseInt(product.get("stock").toString());
-//                        String title = product.get("title").toString();
-//
-//                        // décision  dossier est approuvé si:
-//                        boolean approved =
-//                                salary > 1200 &&
-//                                        amount < 20000 &&
-//                                        rating >= 2.0 &&
-//                                        stock > 0;
-//
-//                        long duration = System.currentTimeMillis() - start;
-//
-//                        // Indique à Camunda que la tâche est terminée & Renvoie des variables au process
-//                        jobClient.newCompleteCommand(job.getKey())
-//                                .variables(Map.of(
-//                                        "approved", approved,
-//                                        "productTitle", title,
-//                                        "price", price,
-//                                        "rating", rating,
-//                                        "stock", stock
-//                                ))
-//                                .send()
-//                                .join();
-//
-//                        System.out.println("✅ approved = " + approved);
-//
-//                        // LOGGING API Envoie un log vers une API interne
-//
-//                        //Contient :processInstanceKey, activité , statut (SUCCESS / REJECTED),durée
-//                        Map<String, Object> log = Map.of(
-//                                "processInstanceKey", job.getProcessInstanceKey(),
-//                                "activity", job.getElementId(),
-//                                "status", approved ? "SUCCESS" : "REJECTED",
-//                                "message", "Verification completed",
-//                                "durationMs", duration,
-//                                "source", "CAMUNDA"
-//                        );
-//
-//                        restTemplate.postForObject(
-//                                "http://localhost:8082/logs",
-//                                log,
-//                                Void.class
-//                        );
-//
-//                    } catch (Exception e) {
-//
-//                        long duration = System.currentTimeMillis() - start;
-//
-//                        System.out.println("❌ ERROR: " + e.getMessage());
-//
-//                        jobClient.newFailCommand(job.getKey())
-//                                .retries(job.getRetries() - 1)
-//                                .errorMessage(e.getMessage())
-//                                .send()
-//                                .join();
-//
-//                        // 🧾 LOG ERROR
-//                        try {
-//                            RestTemplate restTemplate = new RestTemplate();
-//
-//                            Map<String, Object> log = Map.of(
-//                                    "processInstanceKey", job.getProcessInstanceKey(),
-//                                    "activity", job.getElementId(),
-//                                    "status", "ERROR",
-//                                    "message", e.getMessage(),
-//                                    "durationMs", duration,
-//                                    "source", "CAMUNDA"
-//                            );
-//
-//                            restTemplate.postForObject(
-//                                    "http://localhost:8080/logs",
-//                                    log,
-//                                    Void.class
-//                            );
-//                        } catch (Exception ex) {
-//                            System.out.println("❌ Logging failed: " + ex.getMessage());
-//                        }
-//                    }
-//                })
-//                .open();
-//
-//        System.out.println("🚀 Worker verify-applicant started");
-//    }
-//}
-
-
-//
-//    @JobWorker(type = "verify-applicant")
-//    public void handle(JobClient client, ActivatedJob job) {
-//
-//        Map<String, Object> vars = job.getVariablesAsMap();
-//
-//        System.out.println("📥 Variables reçues: " + vars);
-//
-//        int salary = Integer.parseInt(vars.get("salary").toString());
-//
-//        boolean approved = salary > 1200;
-//
-//        client.newCompleteCommand(job.getKey())
-//                .variables(Map.of("approved", approved))
-//                .send()
-//                .join();
-//    }
-//}
